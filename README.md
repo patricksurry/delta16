@@ -29,14 +29,14 @@ However with a source file that's similar to our target we can often do much bet
 | operation | opcode | arguments | action | src | dst |
 | ---       | ---   |  ---    | --- | --- | --- |
 | `END`   | `0000_0000` | - | Update complete, aka `RPL_0`| 0 | 0 |
-| `RPLn`<sup>1</sup>  | `000n_nnnn` | `v0` ... `vn` | Replace $n>0$ bytes from src | $+n$ | $+n$ |
-| `RLOn`<sup>2</sup>  | `001n_nnnn` | - | Relocate $n>0$ little endian offsets(**) | $+2n$ | $+2n$ |
+| `RPLn`  | `000n_nnnn` | `v0` ... `vn` | Replace $n>0$ bytes from src<sup>1</sup>  | $+n$ | $+n$ |
+| `RLOn`  | `001n_nnnn` | - | Relocate $n>0$ little endian offsets<sup>2</sup> | $+2n$ | $+2n$ |
 | `CPY16` | `0100_0000` | `n16` | Copy $n_{16}$ bytes from src | $+n_{16}$ | $+n_{16}$ |
 | `CPYn`  | `01nn_nnnn` | - | Copy $n>0$ bytes from src | $+n$ | $+n$ |
 | | | | | | |
 | `ADD16` | `1000_0000` | `n16 v0` ...  | Insert $n_{16}$ new bytes to dst | 0 | $+n_{16}$ |
 | `ADDn`  | `10nn_nnnn` | `v0` ... `vn` | Insert $n$ new bytes to dst | 0 | $+n$ |
-| `SKP16` | `1100_0000` | `n16` | Skip $n_{16}$ signed<sup>3</sup> bytes of src | $+n_{16}$ | 0 |
+| `SKP16` | `1100_0000` | `n16` | Skip $n_{16}$ signed bytes of src<sup>3</sup> | $+n_{16}$ | 0 |
 | `SKPn`  | `11nn_nnnn` | - | Skip $n$ bytes of src | $+n$ | 0 |
 
 Notes:

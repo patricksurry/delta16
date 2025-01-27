@@ -1,8 +1,15 @@
+from os import path
+
+
 from delta16.util import fletcher16
 from delta16.util import hexstring
 from delta16.util import addr16, pack16
 from delta16.util import find_overlap, find_fragments
 from delta16.util import RelocationTable, IndexMapping
+
+
+def relpath(f):
+    return path.join(path.dirname(__file__), f)
 
 
 def test_fletcher16():
@@ -38,15 +45,33 @@ def test_overlap2():
     ) == (0, 10)
 
 
+def test_overlap_prefix():
+    assert find_overlap(
+        b'abcde the quick brown fox',
+        b'wxzyz@THE quick x brown fox',
+        max_error_run=0,
+        prefix=6
+    )  == (9, 7)
+
+
 def test_fragments():
     assert find_fragments(
         b'the lazy dog was jumped by the quick brown fox',  # dst
         b'the quick brown fox jumps over the lazy dog',     # ref
         block_size = 8,
     ) == [
-        IndexMapping(31, -31, 12),  # "the lazy dog"
-        IndexMapping(0, 27, 19),
+        IndexMapping(start=31,  offset=-31, length=12),     # "the lazy dog"
+        IndexMapping(start=0,   offset=27,  length=19),     # "the quick brown fox"
     ]
+
+
+def test_fragments_many():
+    ref = open(relpath('uc.rom'), 'rb').read()
+    tgt = open(relpath('ucs.rom'), 'rb').read()
+
+    assert len(find_fragments(ref, tgt)) == 9
+    assert len(find_fragments(tgt, ref)) == 10
+
 
 def test_relocation():
     t = RelocationTable([

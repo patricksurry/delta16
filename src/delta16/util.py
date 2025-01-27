@@ -69,48 +69,58 @@ def fletcher16(data: bytes) -> int:
     return (sum2 << 8) | sum1
 
 
-def find_overlap(a: bytes, b: bytes, max_error_run=16) -> tuple[int, int]:
+def find_overlap(a: bytes, b: bytes, max_error_run=16, prefix=0) -> tuple[int, int]:
     """
-    greedy match for longest overlap between a and b
-    allowing up to max_error_run mismatching bytes
+    greedy match for longest overlap between a and b allowing up to
+    max_error_run mismatching bytes
+    with optional prefix, restart after failure until end of prefix
+
     return result as (offset, length)
     """
-    max_n = min(len(a), len(b))
+    limit = min(len(a), len(b))
+    assert prefix < limit
+
     err = 0
-    n = 0
-    while n < max_n and a[n] != b[n]:
-        n += 1
-    if n == max_n:
-        return None
-    start = n
-    while n < max_n:
-        if a[n] != b[n]:
+    i = 0
+    start = None
+    while i < limit:
+        if a[i] != b[i]:
             err += 1
         else:
             err = 0
-        if err > max_error_run:
-            n -= max_error_run
-            break
-        n += 1
-    return (start, n-start)
+            if start is None:
+                start = i
+
+        i += 1
+        if err > max_error_run and start is not None:
+            if i < prefix + max_error_run:
+                start = None
+            else:
+                break
+
+    if start is None:
+        return None
+    else:
+        # remove err chars, with i pointing past last character
+        n = i - start - err
+        assert a[start] == b[start] and a[start+n-1] == b[start+n-1]
+        return (start, n)
 
 
-def find_fragments(dst: bytes, ref: bytes, block_size=64) -> list[IndexMapping]:
+def find_fragments(dst: bytes, src: bytes, block_size=64) -> list[IndexMapping]:
     """
-    find matching fragments betwen ref and dst, with at least block_size/2 overlap
-    returns a list of matches
+    find matching fragments between dst and src, with at least block_size/2 overlap
+    returns a list of matches in increasing (and non-overlapping) dst order
     """
-    if not (dst and ref):
+    if not (dst and src):
         return []
 
     min_size = block_size
-    min_overlap = min(2, block_size // 2)
-    block_size = min(block_size, len(ref))
-
-    r = np.frombuffer(ref, dtype='uint8')
-
-    # make a rectangular array of shifted ref strings
-    # so that we can match a chunk of ref at all possible spots
+    min_overlap = max(2, block_size // 2)
+    block_size = min(block_size, len(src))
+    print(f"find_fragments min_size {min_size} min_overlap {min_overlap} block_size {block_size}")
+    # make a rectangular array of shifted src strings
+    # so that we can match a chunk of src at all possible spots
     # e.g. given "abcdefghij" of length 10 and block size 4
     # we'd make an array of shape 10-4+1 = 7 x 4 and can
     # match a string like "dcfi" like so:
@@ -124,45 +134,49 @@ def find_fragments(dst: bytes, ref: bytes, block_size=64) -> list[IndexMapping]:
     #       ^-----------^------- best match @ index 3
     #
     # Note this will miss partial matches at the start or end
-    # of ref, e.g. "zabc" will score 0.  But we use this
+    # of src, e.g. "zabc" will score 0.  But we use this
     # to find an aligned block, and then extend the matching fragment
     # from there.
 
     # shape (n-block_size+1, block_size)
+    a = np.frombuffer(src, dtype='uint8')
     cmp = np.stack([
-        r[i:i-block_size+1 or None] for i in range(block_size)
+        a[i:i-block_size+1 or None] for i in range(block_size)
     ]).T
 
-    i = 0           # index to dst
+    i_dst = 0
     matches = []
 
-    while i < len(dst):
+    while i_dst < len(dst):
         # take next chunk of dst
-        chunk = np.frombuffer(dst[i:i+block_size], dtype='uint8')
-        # compare it against all the substrings of ref, counting matches
+        chunk = np.frombuffer(dst[i_dst:i_dst+block_size], dtype='uint8')
+        # compare it against all the substrings of src, counting matches
         similarity = (chunk == cmp[:,:len(chunk)]).sum(axis=1)
         # find the offset with the biggest overlap
-        j = int(similarity.argmax())    # index to ref
+        i_src = int(similarity.argmax())    # index to src
         # if we got at least 50% match, find the overlapping length
         match = None
-        if similarity[j] > min_overlap:
+        if similarity[i_src] >= min_overlap:
             # allow the match to extend backward from the end of the last one
             # but not before the start of either string
             lookback = 0 if not matches else min(
-                i - matches[-1].map_end,
-                i,
-                j
+                i_dst - matches[-1].map_end,
+                i_dst,
+                i_src,
             )
-            result = find_overlap(dst[i-lookback:], ref[j-lookback:], max_error_run=min_size//4)
+            result = find_overlap(dst[i_dst - lookback:], src[i_src - lookback:], max_error_run=min_size//4, prefix=lookback)
             assert result
             (start, n) = result
             if n >= min_size:
-                match = IndexMapping(j - lookback + start, i - j, n)
+                match = IndexMapping(i_src - lookback + start, i_dst - i_src, n)
+                if len(dst) < 64:
+                    print(f"match {match} {min_size//4} {src[match.start:][:match.length]} {dst[match.map_start:][:match.length]}")
 
         if match:
+            assert not matches or match.map_start >= matches[-1].map_end, matches + [match]
             matches.append(match)
-            i = match.map_end
+            i_dst = match.map_end
         else:
-            i += block_size
+            i_dst += block_size
 
     return matches
