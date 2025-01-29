@@ -37,7 +37,7 @@ However with a source file that's similar to our target we can often do much bet
 | `ADD16` | `1000_0000` | `n16 v0` ...  | Insert $n_{16}$ new bytes to dst | 0 | $+n_{16}$ |
 | `ADDn`  | `10nn_nnnn` | `v0` ... `vn` | Insert $n$ new bytes to dst | 0 | $+n$ |
 | `SKP16` | `1100_0000` | `n16` | Skip $n_{16}$ signed bytes of src<sup>3</sup> | $+n_{16}$ | 0 |
-| `SKPn`  | `11nn_nnnn` | - | Skip $n$ bytes of src | $+n$ | 0 |
+| `SKPn`  | `11nn_nnnn` | - | Skip $n > 0$ bytes of src | $+n$ | 0 |
 
 Notes:
 

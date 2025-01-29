@@ -61,4 +61,4 @@ def test_rom():
     ref = open(relpath('uc.rom'), 'rb').read()
     delta = Delta16(ref, 0x8000).encode(tgt)
     assert tgt == Delta16(ref, 0x8000).decode(delta)
-    assert len(delta) == 2134
+    assert len(delta) == 2096

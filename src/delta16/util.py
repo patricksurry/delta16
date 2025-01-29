@@ -118,7 +118,7 @@ def find_fragments(dst: bytes, src: bytes, block_size=64) -> list[IndexMapping]:
     min_size = block_size
     min_overlap = max(2, block_size // 2)
     block_size = min(block_size, len(src))
-    print(f"find_fragments min_size {min_size} min_overlap {min_overlap} block_size {block_size}")
+
     # make a rectangular array of shifted src strings
     # so that we can match a chunk of src at all possible spots
     # e.g. given "abcdefghij" of length 10 and block size 4
@@ -169,8 +169,6 @@ def find_fragments(dst: bytes, src: bytes, block_size=64) -> list[IndexMapping]:
             (start, n) = result
             if n >= min_size:
                 match = IndexMapping(i_src - lookback + start, i_dst - i_src, n)
-                if len(dst) < 64:
-                    print(f"match {match} {min_size//4} {src[match.start:][:match.length]} {dst[match.map_start:][:match.length]}")
 
         if match:
             assert not matches or match.map_start >= matches[-1].map_end, matches + [match]

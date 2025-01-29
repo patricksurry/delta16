@@ -1,10 +1,23 @@
 from typing import Literal, Generator, Callable
 from itertools import groupby
+import logging
 
 from .util import pack16, addr16, fletcher16
 from .util import hexstring
 from .util import find_fragments
 from .util import RelocationTable, IndexMapping
+
+
+Op = Literal[
+    'CPY',  # 11nn_nnnn
+    'CPR',  # 01nn_nnnn
+    'CPM',  # 10nn_nnnn
+    'INS',  # 0011_nnnn
+    'SKP',  # 0010_nnnn
+    'RPL',  # 0001_nnnn
+    'MOV',  # 0000_nnnn
+    'END',  # 0000_0000
+]
 
 
 class Delta16:
@@ -39,12 +52,17 @@ class Delta16:
         )
 
     @staticmethod
-    def _pack_op(v: int, n: int) -> bytes:
+    def _pack_op(v: int, n: int, data: bytes = bytes()) -> bytes:
         assert n > 0
-        return bytes([v | n]) if n < 64 else (bytes([v]) + pack16(n))
+        if n < 64:
+            return bytes([v | n]) + data[:n]
+        elif n < 127:
+            return Delta16._pack_op(v, 63, data[:63]) + Delta16._pack_op(v, n-63, data[63:n])
+        else:
+            return bytes([v]) + pack16(n) + data[:n]
 
     @staticmethod
-    def _encode_op(op: Literal['CPY', 'RPL', 'RLO', 'ADD', 'SKP', 'END'], n = 0, data: bytes | None = None) -> bytes:
+    def _encode_op(op: Op, n = 0, data: bytes | None = None) -> bytes:
         assert (op == 'END' and n == 0) or n > 0 or (op == 'SKP' and n < 0)
 
         match op:
@@ -53,17 +71,17 @@ class Delta16:
                 return bytes([0])
             case 'CPY':
                 return Delta16._pack_op(0b0100_0000, n)
-            case 'ADD':
+            case 'INS':
                 assert data and len(data) >= n
-                return Delta16._pack_op(0b1000_0000, n) + data[:n]
+                return Delta16._pack_op(0b1000_0000, n, data)
             case 'SKP':
                 return Delta16._pack_op(0b1100_0000, (n + 0x10000) & 0xffff)
             case 'RPL':
                 assert data and len(data) >= n
                 q, r = divmod(n, 31)
                 return bytes([0b0001_1111] * q + [0b0000_0000 | r]) + data[:n]
-            case 'RLO':
-                assert n & 1 == 0, "RLO must have even argument"
+            case 'MOV':
+                assert n & 1 == 0, "MOV must have even argument"
                 q, r = divmod(n>>1, 31)
                 return bytes([0b0011_1111] * q + [0b0010_0000 | r])
 
@@ -82,11 +100,11 @@ class Delta16:
 
         match v & 0b1100_0000:
             case 0b0000_0000:
-                op = 'RLO' if v & 0b0010_0000 else 'RPL'
+                op = 'MOV' if v & 0b0010_0000 else 'RPL'
             case 0b0100_0000:
                 op = 'CPY'
             case 0b1000_0000:
-                op = 'ADD'
+                op = 'INS'
             case 0b1100_0000:
                 op = 'SKP'
 
@@ -105,16 +123,15 @@ class Delta16:
                 op, n = self._decode_op(data)
 
                 if ready:
-                    pass
-                    # print(f"{op} {n}".ljust(16), f"{hexstring(data[:4])} ...".ljust(16), f"{i_dst:04x}  {i_src:04x}: {hexstring(self.src[i_src:][:4])} ...")
+                   logging.debug(f"{op} {n}".ljust(16) + f"{hexstring(data[:4])} ...".ljust(16) + f"{i_dst:04x}  {i_src:04x}: {hexstring(self.src[i_src:][:4])} ...")
 
                 if not ready:
                     # start or finish a relocation table entry?
-                    if entry and op in ('ADD', 'SKP', 'END'):
+                    if entry and op in ('INS', 'SKP', 'END'):
                         entry = entry._replace(length = i_src - entry.start)
                         entries.append(entry)
                         entry = None
-                    elif entry is None and op not in ('ADD', 'SKP', 'END'):   # CPY, RPL, RLO, SKP
+                    elif entry is None and op not in ('INS', 'SKP', 'END'):   # CPY, RPL, MOV, SKP
                         entry = IndexMapping(i_src, i_dst-i_src, 0)
 
                 match op:
@@ -129,7 +146,7 @@ class Delta16:
                             yield self.src[i_src:][:n]
                         i_src += n
                         i_dst += n
-                    case 'ADD':
+                    case 'INS':
                         if ready:
                             yield data[:n]
                         data = data[n:]
@@ -145,13 +162,13 @@ class Delta16:
                         data = data[n:]
                         i_src += n
                         i_dst += n
-                    case 'RLO':
+                    case 'MOV':
                         if ready:
                             yield b''.join(pack16(relocate(addr16(self.src[i_src + 2*i:]))) for i in range(n))
                         i_src += 2*n
                         i_dst += 2*n
 
-            print('inferred entries', entries)
+            logging.debug('inferred relocation entries', entries)
             relocate = RelocationTable(
                 entries, addr_start = self.src_addr, addr_offset = dst_addr - self.src_addr
             ).relocate
@@ -159,12 +176,11 @@ class Delta16:
     def _enc(self, dst: bytes, dst_addr: int, block_size=64) -> Generator[bytes, None, None]:
         i_src, i_dst = 0, 0
 
-        def debug(op, n):
-            pass
-            # print(f"{op} {n}".ljust(16), f"{i_dst:04x}: {hexstring(dst[i_dst:][:4])} ...".ljust(24), f"{i_src:04x}: {hexstring(self.src[i_src:][:4])} ...")
+        def dbg(op, n):
+            logging.debug(f"{op} {n}".ljust(16) + f"{i_dst:04x}: {hexstring(dst[i_dst:][:4])} ...".ljust(24) + f"{i_src:04x}: {hexstring(self.src[i_src:][:4])} ...")
 
         fragments = find_fragments(dst, self.src, block_size=block_size)
-        print('actual entries', fragments)
+        logging.debug(f"found relocation fragments {fragments}")
         relocate = RelocationTable(
             fragments, addr_start = self.src_addr, addr_offset = dst_addr - self.src_addr
         ).relocate
@@ -181,12 +197,12 @@ class Delta16:
             assert n_dst >= 0, f"fragments not sequential for target"
 
             if n_dst > 0:
-                debug('ADD', n_dst)
-                yield self._encode_op('ADD', n_dst, dst[i_dst:])
+                dbg('INS', n_dst)
+                yield self._encode_op('INS', n_dst, dst[i_dst:])
                 i_dst += n_dst
 
             if n_src != 0:
-                debug('SKP', n_src)
+                dbg('SKP', n_src)
                 yield self._encode_op('SKP', n_src)
                 i_src += n_src
 
@@ -226,13 +242,13 @@ class Delta16:
                     break
 
             if fragment.length != len(diff):
-                print(f"Extended fragment to length {len(diff)} > {fragment.length} with tail {tail}")
+                logging.debug(f"extended fragment {fragment} to length {len(diff)}")
 
             # now we can simply run-length code the difference map
             for v, g in groupby(diff):
                 n = len(list(g))
-                op = {0: 'CPY', 1: 'RPL', 2: 'RLO'}[v]
-                debug(op, n)
+                op = {0: 'CPY', 1: 'RPL', 2: 'MOV'}[v]
+                dbg(op, n)
                 yield self._encode_op(op, n, dst[i_dst:])
                 i_dst += n
                 i_src += n
@@ -240,5 +256,5 @@ class Delta16:
             assert i_dst >= fragment.map_end, "Failed to consume fragment"
 
         assert i_dst == len(dst)
-        debug('END', 0)
+        dbg('END', 0)
         yield self._encode_op('END')
