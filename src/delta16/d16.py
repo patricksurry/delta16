@@ -8,17 +8,33 @@ from .util import find_fragments
 from .util import RelocationTable, IndexMapping
 
 
-Op = Literal[
-    'CPY',  # 11nn_nnnn
-    'CPR',  # 01nn_nnnn
-    'CPM',  # 10nn_nnnn
-    'INS',  # 0011_nnnn
-    'SKP',  # 0010_nnnn
-    'RPL',  # 0001_nnnn
-    'MOV',  # 0000_nnnn
-    'END',  # 0000_0000
-]
+#TODO could use skp8/skp16 kind of thing?
 
+Op = Literal['END', 'CPY', 'INS', 'SKP', 'RPL', 'MOV', 'CPR', 'CPM']
+
+opmap: dict[Op, str] = dict(
+    END='0000_0000',        # must match first
+
+    CPM='0000_nnnn',        # small copy + mov 1 fragment
+    CPR='0001_nnnn',        # small copy + rpl 1 fragment
+    RPL='0010_nnnn',
+    MOV='0011_nnnn',
+
+    CPY='01nn_nnnn',
+    INS='10nn_nnnn',
+    SKP='11nn_nnnn',        # TODO signed is better?
+)
+
+# prefix for the opcode
+opcode = {k: int(v.replace('n','0'),2) for (k, v) in opmap.items()}
+# mask for the payload
+opmask = {k: int(v.replace('1','0').replace('n','1'),2) for (k, v) in opmap.items()}
+# flag for opcodes accepting data
+opdata = {k: k in {'INS', 'RPL', 'CPR'} for k in opcode}
+
+assert (opcode['CPR'] & ~opmask['CPR']) != (opcode['END'] & ~opmask['END'])
+
+pending_copy = 0
 
 class Delta16:
     def __init__(self, src: bytes, src_addr = 0):
@@ -52,61 +68,74 @@ class Delta16:
         )
 
     @staticmethod
-    def _pack_op(v: int, n: int, data: bytes = bytes()) -> bytes:
-        assert n > 0
-        if n < 64:
-            return bytes([v | n]) + data[:n]
-        elif n < 127:
-            return Delta16._pack_op(v, 63, data[:63]) + Delta16._pack_op(v, n-63, data[63:n])
+    def _encode_op(op: Op, n = 0, data: bytes = bytes()) -> bytes:
+        global pending_copy
+        out = bytes()
+        if pending_copy:
+            if n == 1 and op in ('MOV', 'RPL'):
+                op = 'CPM' if op == 'MOV' else 'CPR'
+                n = pending_copy
+            else:
+                out = Delta16._encode_op_inner('CPY', pending_copy)
+            pending_copy = 0
+        if op == 'CPY':
+            pending_copy = n
         else:
-            return bytes([v]) + pack16(n) + data[:n]
+            out += Delta16._encode_op_inner(op, n, data)
+        return out
 
     @staticmethod
-    def _encode_op(op: Op, n = 0, data: bytes | None = None) -> bytes:
-        assert (op == 'END' and n == 0) or n > 0 or (op == 'SKP' and n < 0)
+    def _encode_op_inner(op: Op, n = 0, data: bytes = bytes()) -> bytes:
+        if op == 'SKP':
+            n = (n + 0x10000) & 0xffff
 
-        match op:
-            case 'END':
-                assert n == 0
-                return bytes([0])
-            case 'CPY':
-                return Delta16._pack_op(0b0100_0000, n)
-            case 'INS':
-                assert data and len(data) >= n
-                return Delta16._pack_op(0b1000_0000, n, data)
-            case 'SKP':
-                return Delta16._pack_op(0b1100_0000, (n + 0x10000) & 0xffff)
-            case 'RPL':
-                assert data and len(data) >= n
-                q, r = divmod(n, 31)
-                return bytes([0b0001_1111] * q + [0b0000_0000 | r]) + data[:n]
-            case 'MOV':
-                assert n & 1 == 0, "MOV must have even argument"
-                q, r = divmod(n>>1, 31)
-                return bytes([0b0011_1111] * q + [0b0010_0000 | r])
+        assert (op == 'END' and n == 0) or n > 0
+
+        nd = 1 if op == 'CPR' else n
+
+        if opdata[op]:
+            assert data and len(data) >= nd, f"_encode_op: {op} expected data[:{nd}], got {len(data)}"
+        else:
+            assert not data, f"_encode_op: {op} unexpected data"
+
+        # the maximum value we can pack with the opcode is limit
+        limit = opmask[op]
+        # we encode the count as a packed value nnn as follows:
+        # nnn = 0 means the next two bytes give the little endian value count
+        # nnn = limit means the next byte stores count - limit
+        # nnn in 1...limit-1 gives the actual count
+
+        v = opcode[op]
+        if n > 255 + limit:
+            if v != opcode['END']:
+                # can't encode MOV n16 since it clashes with END
+                return bytes([v | 0]) + pack16(n) + data[:nd]
+            else:
+                # Nb. must not use this for CPR
+                k = 255+limit
+                return bytes([v | limit, 255]) + data[:k] + Delta16._encode_op(op, n-k, data[k:])
+        elif op != 'END' and n >= limit:
+            # single byte length
+            return bytes([v | limit, n-limit]) + data[:nd]
+        else:
+            # packed length
+            return bytes([v | n]) + data[:nd]
 
     @staticmethod
     def _decode_op(data: bytearray) -> tuple[str, int]:
-        op = None
         v = data.pop(0)
-        if v == 0:
-            return ('END', 0)
 
-        n = v & (0b0011_1111 if v & 0b1100_0000 else 0b0001_1111)
-        if not n:
-            n = addr16(data)
-            data.pop(0)
-            data.pop(0)
-
-        match v & 0b1100_0000:
-            case 0b0000_0000:
-                op = 'MOV' if v & 0b0010_0000 else 'RPL'
-            case 0b0100_0000:
-                op = 'CPY'
-            case 0b1000_0000:
-                op = 'INS'
-            case 0b1100_0000:
-                op = 'SKP'
+        op = next(op for op, pfx in opcode.items() if v & ~opmask[op] == pfx)
+        limit = opmask[op]
+        n = v & limit
+        if op != 'END':
+            if n == 0:
+                n = addr16(data)
+                data.pop(0)
+                data.pop(0)
+            elif n == limit:
+                n += data[0]
+                data.pop(0)
 
         return (op, n)
 
@@ -123,7 +152,10 @@ class Delta16:
                 op, n = self._decode_op(data)
 
                 if ready:
-                   logging.debug(f"{op} {n}".ljust(16) + f"{hexstring(data[:4])} ...".ljust(16) + f"{i_dst:04x}  {i_src:04x}: {hexstring(self.src[i_src:][:4])} ...")
+                   logging.debug(
+                       f"{op} {n}".ljust(16) + f"{hexstring(data[:4])} ...".ljust(16)
+                       + f"{i_dst:04x}  {i_src:04x}: {hexstring(self.src[i_src:][:4])} ..."
+                    )
 
                 if not ready:
                     # start or finish a relocation table entry?
@@ -146,6 +178,17 @@ class Delta16:
                             yield self.src[i_src:][:n]
                         i_src += n
                         i_dst += n
+                    case 'CPR':
+                        if ready:
+                            yield self.src[i_src:][:n] + data[:1]
+                        data = data[1:]
+                        i_src += n+1
+                        i_dst += n+1
+                    case 'CPM':
+                        if ready:
+                            yield self.src[i_src:][:n] + pack16(relocate(addr16(self.src[i_src+n:])))
+                        i_src += n+2
+                        i_dst += n+2
                     case 'INS':
                         if ready:
                             yield data[:n]
@@ -168,7 +211,7 @@ class Delta16:
                         i_src += 2*n
                         i_dst += 2*n
 
-            logging.debug('inferred relocation entries', entries)
+            logging.debug(f"inferred relocation entries {entries}")
             relocate = RelocationTable(
                 entries, addr_start = self.src_addr, addr_offset = dst_addr - self.src_addr
             ).relocate
@@ -177,7 +220,10 @@ class Delta16:
         i_src, i_dst = 0, 0
 
         def dbg(op, n):
-            logging.debug(f"{op} {n}".ljust(16) + f"{i_dst:04x}: {hexstring(dst[i_dst:][:4])} ...".ljust(24) + f"{i_src:04x}: {hexstring(self.src[i_src:][:4])} ...")
+            logging.debug(
+                f"{op} {n}".ljust(16) + f"{i_dst:04x}: {hexstring(dst[i_dst:][:4])} ...".ljust(24)
+                + f"{i_src:04x}: {hexstring(self.src[i_src:][:4])} ..."
+            )
 
         fragments = find_fragments(dst, self.src, block_size=block_size)
         logging.debug(f"found relocation fragments {fragments}")
@@ -248,8 +294,15 @@ class Delta16:
             for v, g in groupby(diff):
                 n = len(list(g))
                 op = {0: 'CPY', 1: 'RPL', 2: 'MOV'}[v]
-                dbg(op, n)
-                yield self._encode_op(op, n, dst[i_dst:])
+                arg = n
+                if op == 'MOV':
+                    assert n & 1 == 0, f"MOV acts on pairs, but n={n}"
+                    arg >>= 1
+                dbg(op, arg)
+                if op == 'RPL':
+                    yield self._encode_op(op, arg, dst[i_dst:])
+                else:
+                    yield self._encode_op(op, arg)
                 i_dst += n
                 i_src += n
 
