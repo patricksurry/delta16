@@ -1,9 +1,14 @@
 import numpy as np
+from typing import Callable
 from collections import namedtuple
+
+
+Relocator = Callable[[int], int]
 
 
 class IndexMapping(namedtuple('IndexMapping', ['start', 'offset', 'length'])):
     __slots__ = ()
+
     @property
     def empty(self):
         return not self.length
