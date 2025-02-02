@@ -45,15 +45,6 @@ def test_overlap2():
     ) == (0, 10)
 
 
-def test_overlap_prefix():
-    assert find_overlap(
-        b'abcde the quick brown fox',
-        b'wxzyz@THE quick x brown fox',
-        max_error_run=0,
-        prefix=6
-    )  == (9, 7)
-
-
 def test_fragments():
     assert find_fragments(
         b'the lazy dog was jumped by the quick brown fox',  # dst
@@ -73,11 +64,22 @@ def test_fragments_many():
     assert len(find_fragments(tgt, ref)) == 10
 
 
+def test_relocrepr():
+    t = RelocationTable([
+        IndexMapping(start=0, offset=0, length=1024),
+        IndexMapping(start=512, offset=2048-512, length=1024),
+    ], addr_start=8192, addr_offset = 16384 - 8192)
+
+    assert repr(t) == """\
+[8192:][:1024] => [16384:...]
+[8704:][:1024] => [18432:...]"""
+
+
 def test_relocation():
     t = RelocationTable([
-            IndexMapping(start=0, offset=0, length=1024),
-            IndexMapping(start=512, offset=2048-512, length=1024),
-        ], addr_start=8192, addr_offset = 16384 - 8192)
+        IndexMapping(start=0, offset=0, length=1024),
+        IndexMapping(start=512, offset=2048-512, length=1024),
+    ], addr_start=8192, addr_offset = 16384 - 8192)
 
     assert t.relocate(0) is None
 

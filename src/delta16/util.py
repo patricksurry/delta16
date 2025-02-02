@@ -1,9 +1,5 @@
 import numpy as np
-from typing import Callable
 from collections import namedtuple
-
-
-Relocator = Callable[[int], int]
 
 
 class IndexMapping(namedtuple('IndexMapping', ['start', 'offset', 'length'])):
@@ -18,6 +14,9 @@ class IndexMapping(namedtuple('IndexMapping', ['start', 'offset', 'length'])):
             return i + self.offset
         else:
             return None
+
+    def __repr__(self):
+        return f"[{self.start}:][:{self.length}] => [{self.start+self.offset}:...]"
 
     @property
     def end(self):
@@ -38,6 +37,13 @@ class RelocationTable:
             IndexMapping(e.start + addr_start, e.offset + addr_offset, e.length)
             for e in entries
         ]
+
+    def __repr__(self):
+        return '\n'.join(repr(e) for e in self.entries)
+
+    @classmethod
+    def identity(cls, size=0x10000):
+        return cls([IndexMapping(0,0,size)])
 
     def relocate(self, addr) -> int | None:
         a = None
@@ -74,42 +80,39 @@ def fletcher16(data: bytes) -> int:
     return (sum2 << 8) | sum1
 
 
-def find_overlap(a: bytes, b: bytes, max_error_run=16, prefix=0) -> tuple[int, int]:
+def find_overlap(a: bytes, b: bytes, max_error_run=16) -> tuple[int, int]:
     """
-    greedy match for longest overlap between a and b allowing up to
-    max_error_run mismatching bytes
-    with optional prefix, restart after failure until end of prefix
-
-    return result as (offset, length)
+    find (start, b) so that a[start:][:n] is mostly equal to b[start:][:n]
+    with the end elements matching and at most max_error_run
+    consecutive mismatching values.
+    any initial mismatch is ignored
     """
-    limit = min(len(a), len(b))
-    assert prefix < limit
+    n = min(len(a), len(b))
+    xs = np.frombuffer(a[:n], dtype='uint8')
+    ys = np.frombuffer(b[:n], dtype='uint8')
 
-    err = 0
-    i = 0
-    start = None
-    while i < limit:
-        if a[i] != b[i]:
-            err += 1
-        else:
-            err = 0
-            if start is None:
-                start = i
-
-        i += 1
-        if err > max_error_run and start is not None:
-            if i < prefix + max_error_run:
-                start = None
-            else:
-                break
-
-    if start is None:
-        return None
+    diff = np.where(xs != ys, 1, 0)
+    matched = np.flatnonzero(diff == 0)
+    if len(matched):
+        start, stop = matched[0], matched[-1]+1
     else:
-        # remove err chars, with i pointing past last character
-        n = i - start - err
-        assert a[start] == b[start] and a[start+n-1] == b[start+n-1]
-        return (start, n)
+        return (0, 0)
+    # right shift and left pad with 0, e.g. [0] + diff[:-1]
+    shifted = np.pad(diff[:-1], (1, 0))
+    # tag the start of mismatched runs
+    boundaries = np.flatnonzero(diff - shifted == 1)
+    # do a cumulative sum of mismatches from right to left
+    rcumerr = diff[::-1].cumsum()[::-1]
+    # note the cume sums at the start of runs
+    cumsizes = rcumerr[boundaries]
+    # get run sizes by subtracting the next value
+    sizes = cumsizes - np.pad(cumsizes[1:], (0, 1))
+    # get indices of runs that are too long
+    too_long = np.flatnonzero(sizes > max_error_run)
+    stop = next((boundaries[k] for k in too_long if boundaries[k] >= start), stop)
+    i, j = int(start), int(stop)
+    assert a[i] == b[i] and a[j-1] == b[j-1]
+    return (i, j-i)
 
 
 def find_fragments(dst: bytes, src: bytes, block_size=64) -> list[IndexMapping]:
@@ -169,9 +172,13 @@ def find_fragments(dst: bytes, src: bytes, block_size=64) -> list[IndexMapping]:
                 i_dst,
                 i_src,
             )
-            result = find_overlap(dst[i_dst - lookback:], src[i_src - lookback:], max_error_run=min_size//4, prefix=lookback)
-            assert result
-            (start, n) = result
+            max_err = min_size//4
+            while True:
+                (start, n) = find_overlap(dst[i_dst - lookback:], src[i_src - lookback:], max_error_run=max_err)
+                if start >= lookback or n >= min_size:
+                    break
+                lookback = max(0, lookback - start - n)
+
             if n >= min_size:
                 match = IndexMapping(i_src - lookback + start, i_dst - i_src, n)
 

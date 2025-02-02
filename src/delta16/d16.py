@@ -1,17 +1,17 @@
 from typing import Generator
 from itertools import groupby
-import logging
 
 from .inst import Instruction
 from .util import pack16, addr16, fletcher16
 from .util import find_fragments
-from .util import RelocationTable, IndexMapping, Relocator
+from .util import RelocationTable, IndexMapping
 
 
 class Delta16:
     def __init__(self, src: bytes, src_addr = 0):
         self.src = src
         self.src_addr = src_addr
+        self.rtab = RelocationTable()
 
     def decode(self, delta: bytes) -> bytes:
         # confirm the delta is valid and applies to this source
@@ -20,8 +20,7 @@ class Delta16:
         assert addr16(delta[4:6]) == len(self.src)
         assert addr16(delta[6:8]) == fletcher16(self.src)
         dst_addr = addr16(delta[8:10])
-        dst = b''.join(list(self._dec(delta[10:-2], dst_addr)))
-        open('tmp.dat', 'wb').write(dst)
+        dst = b''.join(list(self._decode(delta[10:-2], dst_addr)))
         assert addr16(delta[-2:]) == fletcher16(dst)
         return dst
 
@@ -35,15 +34,17 @@ class Delta16:
             + pack16(len(self.src))
             + pack16(fletcher16(self.src))
             + pack16(dst_addr)
-            + b''.join(inst.encode() for inst in self._enc(dst, dst_addr, chunk_size))
+            + b''.join(inst.encode() for inst in self._encode(dst, dst_addr, chunk_size))
             + pack16(fletcher16(dst))
         )
 
-    def _dec(self, delta: bytes, dst_addr: int) -> Generator[bytes, None, None]:
+    def _decode(self, delta: bytes, dst_addr: int) -> Generator[bytes, None, None]:
 
         entries: list[IndexMapping] = []
         entry: IndexMapping = None
-        relocate: Relocator = lambda x: x   # dummy for first pass
+
+        # for first pass use a dummy table that uses identity mapping
+        self.rtab = RelocationTable.identity()
 
         for ready in range(2):
             data = bytearray(delta)
@@ -65,17 +66,19 @@ class Delta16:
                     # next pass
                     break
 
-                decoded, i_dst, i_src = inst.apply(self.src, i_dst, i_src, relocate)
+                decoded, i_dst, i_src = inst.apply(self.src, i_dst, i_src, self.rtab.relocate)
                 if ready:
                     yield decoded
 
             if not ready:
-                logging.debug(f"inferred relocation entries {entries}")
-                relocate = RelocationTable(
-                    entries, addr_start = self.src_addr, addr_offset = dst_addr - self.src_addr
-                ).relocate
+                self.rtab = RelocationTable(
+                    entries,
+                    addr_start = self.src_addr,
+                    addr_offset = dst_addr - self.src_addr
+                )
 
-    def _enc(self, dst: bytes, dst_addr: int, block_size=64) -> Generator[Instruction, None, None]:
+    def _encode(self, dst: bytes, dst_addr: int, block_size=64) -> Generator[Instruction, None, None]:
+        """post-process the simple instruction stream with merge options"""
         prev: Instruction | None = None
         for next in self._encbase(dst, dst_addr, block_size):
             if prev:
@@ -91,10 +94,11 @@ class Delta16:
         i_src, i_dst = 0, 0
 
         fragments = find_fragments(dst, self.src, block_size=block_size)
-        logging.debug(f"found relocation fragments {fragments}")
-        relocate = RelocationTable(
-            fragments, addr_start = self.src_addr, addr_offset = dst_addr - self.src_addr
-        ).relocate
+        self.rtab = RelocationTable(
+            fragments,
+            addr_start = self.src_addr,
+            addr_offset = dst_addr - self.src_addr
+        )
 
         # mark the end with an empty fragment
         fragments.append(IndexMapping(start=0, length=0, offset=len(dst)))
@@ -138,20 +142,17 @@ class Delta16:
                     # only consider differences for relocation
                     continue
                 if i > 0 and diff[i-1] == 1 and (
-                        addr16(dst_frag[i-1:]) == relocate(addr16(src_frag[i-1:]))
+                        addr16(dst_frag[i-1:]) == self.rtab.relocate(addr16(src_frag[i-1:]))
                     ):
                     diff[i-1:i+1] = bytes([2,2])
                 elif i+1 < len(diff) and (
-                        addr16(dst_frag[i:]) == relocate(addr16(src_frag[i:]))
+                        addr16(dst_frag[i:]) == self.rtab.relocate(addr16(src_frag[i:]))
                     ):
                     diff[i:i+2] = bytes([2,2])
                 elif i >= fragment.length:
                     # stop if we find a mismatched index in the tail that isn't relocatable
                     diff = diff[:i]
                     break
-
-            if fragment.length != len(diff):
-                logging.debug(f"extended fragment {fragment} to length {len(diff)}")
 
             # now we can simply run-length code the difference map
             for v, g in groupby(diff):

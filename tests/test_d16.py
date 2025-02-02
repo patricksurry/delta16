@@ -12,12 +12,13 @@ def test_nil():
 
 
 def test_identity():
-    ref = b'the quick brown fox jumps over the lazy dog'
+    ref = b'the quick brown fox'
+    assert len(ref) <= Instruction.mask['CPY']  # string should be short enough for a one-byte CPY
     s = Delta16(ref).encode(ref, chunk_size=8)
     assert s[0:2] == bytes([0x16, 0x0d])
     assert s[2:4] == bytes([0, 0])      # src offset
     assert s[4:6] == bytes([len(ref), 0])
-    assert s[6:8] == s[-2:]           # src and dst checksums
+    assert s[6:8] == s[-2:]             # src and dst checksums
     assert s[8:10] == bytes([0, 0])     # dst offset
     assert s[10:-2] == bytes([Instruction.prefix['CPY']|len(ref), 0])
     assert len(s) == 14
